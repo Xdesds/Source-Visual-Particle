@@ -1,0 +1,327 @@
+package visual.particle.client.particle;
+
+import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.render.VertexConsumerProvider;
+import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.projectile.ArrowEntity;
+import net.minecraft.entity.projectile.ProjectileEntity;
+import net.minecraft.entity.projectile.TridentEntity;
+import net.minecraft.entity.projectile.thrown.ThrownEntity;
+import net.minecraft.util.math.Vec3d;
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
+
+public final class VisualParticleSystem {
+	private static final VisualParticleSystem INSTANCE = new VisualParticleSystem();
+	private static final MinecraftClient CLIENT = MinecraftClient.getInstance();
+	private static final int TOTEM_DURATION = 20;
+	private static final float GRAVITY_STRENGTH = 0.04F;
+	private static final int[] RANDOM_COLORS = {
+			0xFFFF0000,
+			0xFFFF7F00,
+			0xFFFFFF00,
+			0xFF00FF00,
+			0xFF00FFFF,
+			0xFF0000FF,
+			0xFF8B00FF,
+			0xFFFF00FF,
+			0xFFFF1493,
+			0xFFFFFFFF,
+			0xFF00FF7F,
+			0xFFFF6347
+	};
+
+	private final List<Particle3D> particles = new ArrayList<>();
+	private final List<TotemEmitter> totemEmitters = new ArrayList<>();
+	private final Settings settings = new Settings();
+	private float walkParticleAccumulator;
+
+	private VisualParticleSystem() {
+	}
+
+	public static VisualParticleSystem getInstance() {
+		return INSTANCE;
+	}
+
+	public Settings getSettings() {
+		return settings;
+	}
+
+	public void tick(MinecraftClient client) {
+		if (!settings.enabled || client.player == null || client.world == null) {
+			clear();
+			return;
+		}
+
+		if (settings.walkTrigger) {
+			handleWalkParticles(client);
+		} else {
+			walkParticleAccumulator = 0.0F;
+		}
+
+		if (settings.projectileTrigger) {
+			handleProjectileParticles(client);
+		}
+
+		handleTotemEmitters();
+		updateParticles();
+	}
+
+	public void spawnAttackParticles(Entity target) {
+		if (!settings.enabled || !settings.attackTrigger || target == null) {
+			return;
+		}
+
+		float spreadValue = settings.spread * 0.15F;
+		for (int i = 0; i < settings.attackAmount; i++) {
+			Vec3d position = new Vec3d(
+					target.getX(),
+					target.getY() + Math.random() * target.getHeight(),
+					target.getZ()
+			);
+			Vec3d velocity = new Vec3d(
+					(Math.random() - 0.5) * 2.0 * spreadValue * settings.speed,
+					(Math.random() - 0.5) * 2.0 * spreadValue * settings.speed,
+					(Math.random() - 0.5) * 2.0 * spreadValue * settings.speed
+			);
+
+			particles.add(createParticle(position, velocity, settings.size, settings.lifeTime));
+		}
+	}
+
+	public void spawnTotemParticles(Entity entity) {
+		if (settings.enabled && settings.totemTrigger && entity != null) {
+			totemEmitters.add(new TotemEmitter(entity, TOTEM_DURATION));
+		}
+	}
+
+	public void render(WorldRenderContext context) {
+		if (particles.isEmpty() || CLIENT.player == null || CLIENT.world == null) {
+			return;
+		}
+
+		MatrixStack matrices = context.matrices();
+		VertexConsumerProvider.Immediate immediate = CLIENT.getBufferBuilders().getEntityVertexConsumers();
+		float tickDelta = CLIENT.getRenderTickCounter().getTickProgress(true);
+
+		for (Particle3D particle : particles) {
+			particle.render(matrices, immediate, settings.glowSize, tickDelta);
+		}
+
+		immediate.draw();
+	}
+
+	private void clear() {
+		particles.clear();
+		totemEmitters.clear();
+		walkParticleAccumulator = 0.0F;
+	}
+
+	private void handleWalkParticles(MinecraftClient client) {
+		double velocitySq = client.player.getVelocity().lengthSquared();
+		boolean isMoving = velocitySq > 0.0001 && !client.player.isSneaking();
+
+		if (!isMoving) {
+			walkParticleAccumulator = 0.0F;
+			return;
+		}
+
+		float particlesPerTick = settings.walkAmount / 20.0F;
+		walkParticleAccumulator += particlesPerTick;
+		int particlesToSpawn = (int) walkParticleAccumulator;
+		walkParticleAccumulator -= particlesToSpawn;
+
+		if (particlesToSpawn <= 0) {
+			return;
+		}
+
+		float yaw = client.player.getYaw();
+		double radians = Math.toRadians(yaw + 90.0F);
+		double offsetX = Math.cos(radians) * 0.5;
+		double offsetZ = Math.sin(radians) * 0.5;
+		float spreadValue = settings.spread * 0.05F;
+
+		for (int i = 0; i < particlesToSpawn; i++) {
+			Vec3d position = new Vec3d(
+					client.player.getX() - offsetX + (Math.random() - 0.5) * 0.3,
+					client.player.getY() + 0.3 + Math.random() * (client.player.getHeight() - 0.3),
+					client.player.getZ() - offsetZ + (Math.random() - 0.5) * 0.3
+			);
+			Vec3d velocity = new Vec3d(
+					(Math.random() - 0.5) * spreadValue * settings.speed,
+					(Math.random() - 0.5) * spreadValue * 0.5 * settings.speed,
+					(Math.random() - 0.5) * spreadValue * settings.speed
+			);
+
+			particles.add(createParticle(position, velocity, settings.size * 0.6F, settings.lifeTime * 0.5F));
+		}
+	}
+
+	private void handleProjectileParticles(MinecraftClient client) {
+		float spreadValue = settings.spread * 0.03F;
+
+		for (Entity entity : client.world.getEntities()) {
+			if (!(entity instanceof ThrownEntity || entity instanceof ArrowEntity || entity instanceof TridentEntity)) {
+				continue;
+			}
+
+			ProjectileEntity projectile = (ProjectileEntity) entity;
+			boolean isMoving = Math.abs(projectile.getX() - projectile.lastX) > 0.01
+					|| Math.abs(projectile.getY() - projectile.lastY) > 0.01
+					|| Math.abs(projectile.getZ() - projectile.lastZ) > 0.01;
+
+			if (!isMoving && projectile.getVelocity().lengthSquared() <= 0.01) {
+				continue;
+			}
+
+			for (int i = 0; i < 2; i++) {
+				Vec3d position = new Vec3d(
+						projectile.getX() + (Math.random() - 0.5) * 0.5,
+						projectile.getY() + Math.random() * projectile.getHeight(),
+						projectile.getZ() + (Math.random() - 0.5) * 0.5
+				);
+				Vec3d velocity = new Vec3d(
+						(Math.random() - 0.5) * 2.0 * spreadValue * settings.speed,
+						(Math.random() - 0.5) * 2.0 * spreadValue * settings.speed,
+						(Math.random() - 0.5) * 2.0 * spreadValue * settings.speed
+				);
+
+				particles.add(createParticle(position, velocity, settings.size * 0.5F, settings.lifeTime * 0.3F));
+			}
+		}
+	}
+
+	private void handleTotemEmitters() {
+		Iterator<TotemEmitter> iterator = totemEmitters.iterator();
+		while (iterator.hasNext()) {
+			TotemEmitter emitter = iterator.next();
+			emitter.tick();
+
+			if (emitter.isAlive()) {
+				spawnTotemBurst(emitter.getEntity(), emitter.getProgress());
+			} else {
+				iterator.remove();
+			}
+		}
+	}
+
+	private void updateParticles() {
+		Iterator<Particle3D> iterator = particles.iterator();
+		while (iterator.hasNext()) {
+			Particle3D particle = iterator.next();
+			particle.update();
+
+			if (particle.isDead()) {
+				iterator.remove();
+			}
+		}
+	}
+
+	private void spawnTotemBurst(Entity entity, float progress) {
+		if (entity == null || entity.isRemoved()) {
+			return;
+		}
+
+		float spreadMultiplier = 1.0F - progress * 0.5F;
+		for (int i = 0; i < 4; i++) {
+			double x = Math.random() * 2.0 - 1.0;
+			double y = Math.random() * 2.0 - 1.0;
+			double z = Math.random() * 2.0 - 1.0;
+
+			if (x * x + y * y + z * z > 1.0) {
+				continue;
+			}
+
+			Vec3d position = new Vec3d(
+					entity.getX() + x * entity.getWidth() * 0.5,
+					entity.getBodyY(0.5) + y * entity.getHeight() * 0.5,
+					entity.getZ() + z * entity.getWidth() * 0.5
+			);
+			double velocityScale = settings.spread * 0.18 * spreadMultiplier * settings.speed;
+			double upward = Math.random() < 0.4
+					? (0.15 + Math.random() * 0.2) * settings.speed
+					: (0.03 + Math.random() * 0.07) * settings.speed;
+			Vec3d velocity = new Vec3d(x * velocityScale, upward, z * velocityScale);
+			particles.add(createParticle(position, velocity, settings.size * 0.8F, settings.lifeTime * 0.8F, getTotemColor()));
+		}
+	}
+
+	private Particle3D createParticle(Vec3d position, Vec3d velocity, float size, float lifeTime) {
+		return createParticle(position, velocity, size, lifeTime, getParticleColor());
+	}
+
+	private Particle3D createParticle(Vec3d position, Vec3d velocity, float size, float lifeTime, int color) {
+		return new Particle3D(position, velocity, color, size, lifeTime)
+				.setGravity(getGravity())
+				.setVelocityMultiplier(0.99F)
+				.setMode(settings.particleMode)
+				.setGlowMode(settings.glowMode);
+	}
+
+	private int getParticleColor() {
+		if (settings.randomColor) {
+			return RANDOM_COLORS[ThreadLocalRandom.current().nextInt(RANDOM_COLORS.length)];
+		}
+
+		return settings.color;
+	}
+
+	private int getTotemColor() {
+		int[] totemColors = {
+				0xFF7CFC00,
+				0xFFFFD700,
+				0xFF32CD32,
+				0xFFFFA500,
+				0xFF00FF00,
+				0xFFADFF2F
+		};
+		return totemColors[ThreadLocalRandom.current().nextInt(totemColors.length)];
+	}
+
+	private float getGravity() {
+		return (1.0F - 0.9F) * GRAVITY_STRENGTH;
+	}
+
+	public static final class Settings {
+		public boolean enabled = true;
+		public boolean attackTrigger = true;
+		public boolean totemTrigger = true;
+		public boolean walkTrigger = true;
+		public boolean projectileTrigger = true;
+		public boolean randomColor = false;
+		public Particle3D.ParticleMode particleMode = Particle3D.ParticleMode.STAR;
+		public Particle3D.GlowMode glowMode = Particle3D.GlowMode.BOTH;
+		public int attackAmount = 40;
+		public int walkAmount = 30;
+		public float spread = 1.0F;
+		public float speed = 2.0F;
+		public float lifeTime = 2.5F;
+		public float size = 1.0F;
+		public float glowSize = 7.5F;
+		public int color = 0xFF896148;
+
+		public void reset() {
+			enabled = true;
+			attackTrigger = true;
+			totemTrigger = true;
+			walkTrigger = true;
+			projectileTrigger = true;
+			randomColor = false;
+			particleMode = Particle3D.ParticleMode.STAR;
+			glowMode = Particle3D.GlowMode.BOTH;
+			attackAmount = 40;
+			walkAmount = 30;
+			spread = 1.0F;
+			speed = 2.0F;
+			lifeTime = 2.5F;
+			size = 1.0F;
+			glowSize = 7.5F;
+			color = 0xFF896148;
+		}
+	}
+}
